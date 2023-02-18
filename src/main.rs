@@ -1,5 +1,15 @@
-use core::panic;
-use std::io::{BufWriter, Write};
+use anyhow::anyhow;
+use chacha20poly1305::{
+    aead::{stream, Aead, NewAead},
+    XChaCha20Poly1305,
+};
+
+use rand::{rngs::OsRng, RngCore};
+use std::{
+    fs::{self, File},
+    io::{Read, Write},
+    path::PathBuf,
+};
 
 fn main() {
     Cli::from_args(std::env::args().skip(1).collect());
@@ -37,28 +47,25 @@ impl Cli {
             panic!("currently handling files only!")
         }
         let file_origin = std::fs::File::open(path.clone()).unwrap();
-        let output_path = {
-            let filename = path
-                .components()
-                .last()
-                .unwrap()
-                .as_os_str()
-                .to_str()
-                .unwrap();
-            let mut it = path.components();
-            it.next_back().unwrap(); // remove last
-            let mut path = std::path::PathBuf::new();
-            path.extend(it);
-            path.extend(vec![filename.to_owned() + ".bkp"]);
-            path
-        };
+        let compressed_file_path = path_append(path, ".brotli");
 
-        let file_output = std::fs::File::create(output_path).unwrap();
+        let compressed_out = std::fs::File::create(compressed_file_path.clone()).unwrap();
 
-        match self.compress(file_origin, file_output) {
+        match self.compress(file_origin, compressed_out) {
             Err(e) => panic!("{}", e),
             Ok(_) => {
-                println!("hehe");
+                println!("compression OK!");
+            }
+        }
+
+        let encrypted_file_path = path_append(compressed_file_path.clone(), ".enc");
+        let enc_inp = File::open(compressed_file_path).unwrap();
+        let enc_out = File::create(encrypted_file_path).unwrap();
+
+        match self.encrypt(enc_inp, enc_out) {
+            Err(e) => panic!("{}", e),
+            Ok(_) => {
+                println!("encryption OK!")
             }
         }
 
@@ -103,9 +110,68 @@ impl Cli {
         Ok(())
     }
 
-    fn encrypt(&self) {}
+    fn encrypt<R: std::io::Read, W: std::io::Write>(
+        &self,
+        mut r: R,
+        mut w: W,
+    ) -> Result<(), String> {
+        let mut key = [0u8; 32];
+        let mut nonce = [0u8; 19];
+        OsRng.fill_bytes(&mut key);
+        OsRng.fill_bytes(&mut nonce);
+
+        let aead = XChaCha20Poly1305::new(key.as_ref().into());
+        let mut stream_encryptor = stream::EncryptorBE32::from_aead(aead, nonce.as_ref().into());
+
+        const BUFFER_LEN: usize = 500;
+        let mut buffer = [0u8; BUFFER_LEN];
+
+        loop {
+            match r.read(&mut buffer) {
+                Err(e) => {
+                    if let std::io::ErrorKind::Interrupted = e.kind() {
+                        continue;
+                    }
+                    return Err(e.to_string());
+                }
+                Ok(read_count) => {
+                    if read_count == BUFFER_LEN {
+                        let ciphertext = stream_encryptor.encrypt_next(buffer.as_slice()).unwrap();
+                        if let Err(e) = w.write(&ciphertext) {
+                            return Err(e.to_string());
+                        }
+                    } else {
+                        let ciphertext = stream_encryptor
+                            .encrypt_last(&buffer[..read_count])
+                            .unwrap();
+                        if let Err(e) = w.write(&ciphertext) {
+                            return Err(e.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn upload(&self) {}
+}
+
+fn path_append(path: PathBuf, to_append: &str) -> PathBuf {
+    let filename = path
+        .components()
+        .last()
+        .unwrap()
+        .as_os_str()
+        .to_str()
+        .unwrap();
+    let mut it = path.components();
+    it.next_back().unwrap(); // remove last
+    let mut path = std::path::PathBuf::new();
+    path.extend(it);
+    path.extend(vec![filename.to_owned() + to_append]);
+    path
 }
 
 #[cfg(test)]
