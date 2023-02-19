@@ -7,7 +7,7 @@ use chacha20poly1305::{
 use rand::{rngs::OsRng, RngCore};
 use std::{
     fs::{self, File},
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     path::PathBuf,
 };
 
@@ -46,23 +46,19 @@ impl Cli {
         if !path.is_file() {
             panic!("currently handling files only!")
         }
-        let file_origin = std::fs::File::open(path.clone()).unwrap();
-        let compressed_file_path = path_append(path, ".brotli");
-
-        let compressed_out = std::fs::File::create(compressed_file_path.clone()).unwrap();
-
-        match self.compress(file_origin, compressed_out) {
+        let mut file_origin = std::fs::File::open(path.clone()).unwrap();
+        let mut compressed_bytes = Vec::new();
+        match self.compress(&mut file_origin, &mut compressed_bytes) {
             Err(e) => panic!("{}", e),
             Ok(_) => {
                 println!("compression OK!");
             }
         }
 
-        let encrypted_file_path = path_append(compressed_file_path.clone(), ".enc");
-        let enc_inp = File::open(compressed_file_path).unwrap();
-        let enc_out = File::create(encrypted_file_path).unwrap();
+        let out_path = path_append(path.clone(), ".bkp");
+        let mut enc_out = File::create(out_path).unwrap();
 
-        match self.encrypt(enc_inp, enc_out) {
+        match self.encrypt(&mut compressed_bytes.as_slice(), &mut enc_out) {
             Err(e) => panic!("{}", e),
             Ok(_) => {
                 println!("encryption OK!")
@@ -72,7 +68,11 @@ impl Cli {
         Ok(())
     }
 
-    fn compress<R: std::io::Read, W: std::io::Write>(&self, mut r: R, w: W) -> Result<(), String> {
+    fn compress<R: std::io::Read, W: std::io::Write>(
+        &self,
+        r: &mut R,
+        w: &mut W,
+    ) -> Result<(), String> {
         let mut writer = brotli::CompressorWriter::new(
             w, 4096, /* buffer size */
             9,    /* compression levels 0-9 */
@@ -112,8 +112,8 @@ impl Cli {
 
     fn encrypt<R: std::io::Read, W: std::io::Write>(
         &self,
-        mut r: R,
-        mut w: W,
+        r: &mut R,
+        w: &mut W,
     ) -> Result<(), String> {
         let mut key = [0u8; 32];
         let mut nonce = [0u8; 19];
