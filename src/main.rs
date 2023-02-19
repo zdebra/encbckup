@@ -1,13 +1,8 @@
-use anyhow::anyhow;
-use chacha20poly1305::{
-    aead::{stream, Aead, NewAead},
-    XChaCha20Poly1305,
-};
-
-use rand::{rngs::OsRng, RngCore};
+use cryptostream::read;
+use openssl::symm::Cipher;
 use std::{
-    fs::{self, File},
-    io::{Cursor, Read, Write},
+    fs::File,
+    io::{Read, Write},
     path::PathBuf,
 };
 
@@ -16,13 +11,18 @@ fn main() {
 }
 
 struct Cli {
-    // path: std::path::PathBuf,
+    key: Vec<u8>,
+    iv: Vec<u8>,
 }
 
 impl Cli {
     fn from_args(args: Vec<String>) {
         let mut args = args.into_iter();
         let command = args.next().expect("command is missing");
+
+        let key: Vec<_> = base64::decode("kjtbxCPw3XPFThb3mKmzfg==").unwrap();
+        let iv: Vec<_> = base64::decode("dB0Ej+7zWZWTS5JUCldWMg==").unwrap();
+
         match command.as_str() {
             "backup" => {
                 let path = args.next().expect("path to backup is missing");
@@ -32,11 +32,21 @@ impl Cli {
                     panic!("path `{}` doesn't exist", path.display())
                 }
 
-                let cli = Self {};
+                let cli = Self { key, iv };
                 if let Err(err) = cli.backup(path) {
                     panic!("backup failed: {}", err);
                 }
                 println!("backup was successful!");
+            }
+            "restore" => {
+                let remote_path = args.next().expect("remote path to restore is missing");
+                let remote_path = std::path::PathBuf::from(remote_path);
+
+                let cli = Self { key, iv };
+                if let Err(err) = cli.restore(remote_path) {
+                    panic!("restore failed: {}", err);
+                }
+                println!("restore successful");
             }
             _ => panic!("invalid command"),
         }
@@ -64,6 +74,29 @@ impl Cli {
                 println!("encryption OK!")
             }
         }
+
+        Ok(())
+    }
+
+    fn restore(&self, remote_path: PathBuf) -> Result<(), String> {
+        if !remote_path.is_file() {
+            panic!("currently handling files only!")
+        }
+        let mut file_origin = std::fs::File::open(remote_path.clone()).unwrap();
+        let mut decrypted_bytes = Vec::new();
+        if let Err(e) = self.decrypt(&mut file_origin, &mut decrypted_bytes) {
+            return Err(format!("decrypt failed: {}", e));
+        }
+        println!("decrypt OK!");
+
+        // let out_path = remove_suffix(remote_path, ".bkp");
+        let out_path = path_append(remote_path.clone(), ".ubkp");
+        let mut dec_out = File::create(out_path).unwrap();
+
+        if let Err(e) = self.decompress(&mut decrypted_bytes.as_slice(), &mut dec_out) {
+            return Err(format!("decompress failed: {}", e));
+        }
+        println!("decompress OK!");
 
         Ok(())
     }
@@ -110,24 +143,57 @@ impl Cli {
         Ok(())
     }
 
+    fn decompress<R: std::io::Read, W: std::io::Write>(
+        &self,
+        r: &mut R, /* compressed bytes */
+        w: &mut W, /* decompressed bytes */
+    ) -> Result<(), String> {
+        let mut writer = brotli::DecompressorWriter::new(w, 4096 /* buffer size */);
+
+        let mut buf = [0u8; 4096];
+        loop {
+            match r.read(&mut buf) {
+                Err(e) => {
+                    if let std::io::ErrorKind::Interrupted = e.kind() {
+                        continue;
+                    }
+                    return Err(e.to_string());
+                }
+                Ok(size) => {
+                    if size == 0 {
+                        match writer.flush() {
+                            Err(e) => {
+                                if let std::io::ErrorKind::Interrupted = e.kind() {
+                                    continue;
+                                }
+                                return Err(e.to_string());
+                            }
+                            Ok(_) => break,
+                        }
+                    }
+                    match writer.write_all(&buf[..size]) {
+                        Err(e) => return Err(e.to_string()),
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn encrypt<R: std::io::Read, W: std::io::Write>(
         &self,
         r: &mut R,
         w: &mut W,
     ) -> Result<(), String> {
-        let mut key = [0u8; 32];
-        let mut nonce = [0u8; 19];
-        OsRng.fill_bytes(&mut key);
-        OsRng.fill_bytes(&mut nonce);
+        let mut encryptor =
+            read::Encryptor::new(r, Cipher::aes_128_cbc(), &self.key, &self.iv).unwrap();
 
-        let aead = XChaCha20Poly1305::new(key.as_ref().into());
-        let mut stream_encryptor = stream::EncryptorBE32::from_aead(aead, nonce.as_ref().into());
-
-        const BUFFER_LEN: usize = 500;
+        const BUFFER_LEN: usize = 128;
         let mut buffer = [0u8; BUFFER_LEN];
 
         loop {
-            match r.read(&mut buffer) {
+            match encryptor.read(&mut buffer) {
                 Err(e) => {
                     if let std::io::ErrorKind::Interrupted = e.kind() {
                         continue;
@@ -135,19 +201,43 @@ impl Cli {
                     return Err(e.to_string());
                 }
                 Ok(read_count) => {
-                    if read_count == BUFFER_LEN {
-                        let ciphertext = stream_encryptor.encrypt_next(buffer.as_slice()).unwrap();
-                        if let Err(e) = w.write(&ciphertext) {
-                            return Err(e.to_string());
-                        }
-                    } else {
-                        let ciphertext = stream_encryptor
-                            .encrypt_last(&buffer[..read_count])
-                            .unwrap();
-                        if let Err(e) = w.write(&ciphertext) {
-                            return Err(e.to_string());
-                        }
+                    if read_count == 0 {
                         break;
+                    }
+                    if let Err(e) = w.write_all(&buffer) {
+                        return Err(e.to_string());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decrypt<R: std::io::Read, W: std::io::Write>(
+        &self,
+        r: &mut R, /* encrypted bytes */
+        w: &mut W, /* decrypted bytes */
+    ) -> Result<(), String> {
+        let mut decryptor =
+            read::Decryptor::new(r, Cipher::aes_128_cbc(), &self.key, &self.iv).unwrap();
+
+        const BUFFER_LEN: usize = 128;
+        let mut buffer = [0u8; BUFFER_LEN];
+
+        loop {
+            match decryptor.read(&mut buffer) {
+                Err(e) => {
+                    if let std::io::ErrorKind::Interrupted = e.kind() {
+                        continue;
+                    }
+                    return Err(e.to_string());
+                }
+                Ok(read_count) => {
+                    if read_count == 0 {
+                        break;
+                    }
+                    if let Err(e) = w.write_all(&buffer) {
+                        return Err(e.to_string());
                     }
                 }
             }
@@ -171,6 +261,24 @@ fn path_append(path: PathBuf, to_append: &str) -> PathBuf {
     let mut path = std::path::PathBuf::new();
     path.extend(it);
     path.extend(vec![filename.to_owned() + to_append]);
+    path
+}
+
+fn remove_suffix(path: PathBuf, suffix: &str) -> PathBuf {
+    let last_item = path
+        .components()
+        .last()
+        .unwrap()
+        .as_os_str()
+        .to_str()
+        .unwrap();
+    let mut it = path.components();
+    it.next_back().unwrap(); // remove last
+    let mut path = std::path::PathBuf::new();
+    path.extend(it);
+
+    let last_item = last_item.strip_suffix(suffix).unwrap_or(last_item);
+    path.extend(vec![last_item]);
     path
 }
 
