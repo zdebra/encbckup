@@ -1,10 +1,7 @@
-use cryptostream::read;
-use openssl::symm::Cipher;
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::PathBuf,
-};
+mod crypt;
+
+use crate::crypt::{decrypt, encrypt, Cryptography};
+use std::{fs::File, io::Write, path::PathBuf};
 
 fn main() {
     Cli::from_args(std::env::args().skip(1).collect());
@@ -186,31 +183,14 @@ impl Cli {
         r: &mut R,
         w: &mut W,
     ) -> Result<(), String> {
-        let mut encryptor =
-            read::Encryptor::new(r, Cipher::aes_128_cbc(), &self.key, &self.iv).unwrap();
-
-        const BUFFER_LEN: usize = 128;
-        let mut buffer = [0u8; BUFFER_LEN];
-
-        loop {
-            match encryptor.read(&mut buffer) {
-                Err(e) => {
-                    if let std::io::ErrorKind::Interrupted = e.kind() {
-                        continue;
-                    }
-                    return Err(e.to_string());
-                }
-                Ok(read_count) => {
-                    if read_count == 0 {
-                        break;
-                    }
-                    if let Err(e) = w.write_all(&buffer) {
-                        return Err(e.to_string());
-                    }
-                }
-            }
-        }
-        Ok(())
+        return encrypt(
+            r,
+            w,
+            &Cryptography {
+                key: self.key.clone(),
+                iv: self.iv.clone(),
+            },
+        );
     }
 
     fn decrypt<R: std::io::Read, W: std::io::Write>(
@@ -218,31 +198,14 @@ impl Cli {
         r: &mut R, /* encrypted bytes */
         w: &mut W, /* decrypted bytes */
     ) -> Result<(), String> {
-        let mut decryptor =
-            read::Decryptor::new(r, Cipher::aes_128_cbc(), &self.key, &self.iv).unwrap();
-
-        const BUFFER_LEN: usize = 128;
-        let mut buffer = [0u8; BUFFER_LEN];
-
-        loop {
-            match decryptor.read(&mut buffer) {
-                Err(e) => {
-                    if let std::io::ErrorKind::Interrupted = e.kind() {
-                        continue;
-                    }
-                    return Err(e.to_string());
-                }
-                Ok(read_count) => {
-                    if read_count == 0 {
-                        break;
-                    }
-                    if let Err(e) = w.write_all(&buffer) {
-                        return Err(e.to_string());
-                    }
-                }
-            }
-        }
-        Ok(())
+        return decrypt(
+            r,
+            w,
+            &Cryptography {
+                key: self.key.clone(),
+                iv: self.iv.clone(),
+            },
+        );
     }
 
     fn upload(&self) {}
