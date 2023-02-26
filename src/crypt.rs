@@ -93,8 +93,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encrypt_decrypt() {
+    fn test_encrypt_decrypt_small() {
         let data = vec![20, 30, 40];
+        let mut buf = Vec::new();
+
+        let key: Vec<_> = base64::decode("kjtbxCPw3XPFThb3mKmzfg==").unwrap();
+        let iv: Vec<_> = base64::decode("dB0Ej+7zWZWTS5JUCldWMg==").unwrap();
+
+        let c = Cryptography { key, iv };
+        let res = encrypt(&mut data.as_slice(), &mut buf, &c);
+        assert!(res.is_ok());
+
+        let mut out = Vec::new();
+        let res = decrypt(&mut buf.as_slice(), &mut out, &c);
+        assert!(res.is_ok());
+
+        assert_eq!(data, out);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_big() {
+        let data = "
+        aaaaaaaaaaaaaaaaaaaabbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
+        bbbbbbbcccccccccccccccccccccccccccccccccccccccccc\
+        ddddddddddddddddd"
+            .as_bytes()
+            .to_vec();
         let mut buf = Vec::new();
 
         let key: Vec<_> = base64::decode("kjtbxCPw3XPFThb3mKmzfg==").unwrap();

@@ -269,6 +269,6 @@ mod tests {
 
     #[test]
     fn test_from_args() {
-        Cli::from_args(vec!["backup".to_string(), "src".to_string()]);
+        Cli::from_args(vec!["backup".to_string(), "res/jpg_image.jpg".to_string()]);
     }
 }
