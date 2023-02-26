@@ -32,8 +32,15 @@ pub fn encrypt<R: std::io::Read, W: std::io::Write>(
                     }
                     break;
                 }
-                if let Err(e) = w.write_all(&buffer) {
-                    return Err(e.to_string());
+                match w.write(&buffer[..read_count]) {
+                    Err(e) => {
+                        return Err(e.to_string());
+                    }
+                    Ok(written_count) => {
+                        if written_count != read_count {
+                            return Err("written_count != read_count".to_string());
+                        }
+                    }
                 }
             }
         }
@@ -66,8 +73,15 @@ pub fn decrypt<R: std::io::Read, W: std::io::Write>(
                     }
                     break;
                 }
-                if let Err(e) = w.write_all(&buffer) {
-                    return Err(e.to_string());
+                match w.write(&buffer[..read_count]) {
+                    Err(e) => {
+                        return Err(e.to_string());
+                    }
+                    Ok(written_count) => {
+                        if written_count != read_count {
+                            return Err("written_count != read_count".to_string());
+                        }
+                    }
                 }
             }
         }
